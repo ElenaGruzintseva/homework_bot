@@ -1,12 +1,14 @@
 import logging
 import logging.handlers
 import os
-import requests
-import time
 import sys
+import time
 from http import HTTPStatus
+
+import requests
 from dotenv import load_dotenv
 from telebot import TeleBot
+
 from exceptions import RequestError, UnexpectedStatusErorr
 
 load_dotenv()
@@ -16,7 +18,6 @@ logging.basicConfig(
     level=logging.DEBUG,
 )
 
-
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -24,7 +25,6 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
-
 
 HOMEWORK_VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
@@ -35,8 +35,18 @@ HOMEWORK_VERDICTS = {
 
 def check_tokens():
     """Checks the availability of environment variables."""
-    token_list = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-    return all(token_list)
+    missing_tokens = []
+    if not PRACTICUM_TOKEN:
+        missing_tokens.append('PRACTICUM_TOKEN')
+    if not TELEGRAM_TOKEN:
+        missing_tokens.append('TELEGRAM_TOKEN')
+    if not TELEGRAM_CHAT_ID:
+        missing_tokens.append('TELEGRAM_CHAT_ID')
+    if missing_tokens:
+        for token in missing_tokens:
+            logging.critical(f'Отсутствует обязательная переменная: {token}')
+        return False
+    return True
 
 
 def send_message(bot, message):
@@ -55,61 +65,62 @@ def send_message(bot, message):
 def get_api_answer(timestamp):
     """Makes a request to the endpoint of the API service."""
     try:
-        homework = requests.get(
+        response = requests.get(
             ENDPOINT,
             headers=HEADERS,
             params={'from_date': timestamp}
         )
-        if homework.status_code != HTTPStatus.OK:
-            logging.error('Сервер не отвечает')
-            raise RequestError('Сервер не отвечает')
-        else:
-            return homework.json()
     except requests.exceptions.RequestException as error:
-        logging.error('Эндпоит недоступен')
-        raise RuntimeError(error)
+        raise RuntimeError(f'Эндпоит недоступен: {error}')
+    if response.status_code != HTTPStatus.OK:
+        raise RequestError(
+            f'Сервер не отвечает, статус: {response.status_code}'
+        )
+    return response.json()
 
 
 def check_response(response):
     """Checks the API response for compliance with the documentation."""
     if not isinstance(response, dict):
-        raise TypeError('Ответ не соответствет типу данных')
-    elif 'current_date' not in response or 'homeworks' not in response:
-        logging.error('Отсутствие ожидаемых ключей в ответе API')
-        raise KeyError('Отсутствие ожидаемых ключей в ответе API')
-    homework = response.get('homeworks')
+        raise TypeError(f"Ответ не соответствет типу данных: {type(response)}")
+    if 'current_date' not in response:
+        raise KeyError("Ключ 'current_date' отсутствует в ответе API")
+    if 'homeworks' not in response:
+        raise KeyError("Ключ 'homeworks' отсутствует в ответе API")
+    homework = response['homeworks']
     if not isinstance(homework, list):
-        raise TypeError('Список домашних работ не является списком')
-    elif not homework:
-        logging.debug('Список домашних работ пуст')
+        raise TypeError(
+            f"Список домашних работ не является списком: {type(homework)}"
+        )
     return homework
 
 
 def parse_status(homework):
     """Retrieves the task status from the homework information."""
-    homework_name = homework.get('homework_name')
-    status = homework.get('status')
-    if not homework_name:
-        logging.error('Отсутствуют необходимые ключи в переданном словаре')
-        raise KeyError('Отсутствуют необходимые ключи в переданном словаре')
-    elif status not in HOMEWORK_VERDICTS:
-        logging.error('Неожиданный статус домашней работы')
-        raise UnexpectedStatusErorr('Неожиданный статус домашней работы')
-    verdict = HOMEWORK_VERDICTS.get(status)
+    if 'homework_name' not in homework:
+        raise KeyError("Ключ 'homework_name' отсутствует в переданном словаре")
+    if 'status' not in homework:
+        raise KeyError("Ключ 'status' отсутствует в переданном словаре")
+    homework_name = homework['homework_name']
+    status = homework['status']
+    if status not in HOMEWORK_VERDICTS:
+        raise UnexpectedStatusErorr(
+            f"Неожиданный статус домашней работы: {status}"
+        )
+    verdict = HOMEWORK_VERDICTS[status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """The basic logic of the work."""
-    bot = TeleBot(token=TELEGRAM_TOKEN)
-    timestamp = int(time.time())
     if not check_tokens():
         logging.critical(
-            'Отсутствует обязательная переменная окружения.'
+            'Отсутствуют обязательные переменные окружения.'
         )
         sys.exit(1)
+    bot = TeleBot(token=TELEGRAM_TOKEN)
     message_list = []
-
+    timestamp = int(time.time())
     while True:
         try:
             hw = get_api_answer(timestamp)
@@ -121,7 +132,7 @@ def main():
                     message_list.append(message)
                     send_message(bot, message)
                 else:
-                    logging.debug('отсутствие в ответе новых статусов')
+                    logging.debug('Отсутствие в ответе новых статусов')
             else:
                 logging.debug('Отсутствие в ответе новых статусов')
             timestamp = int(hw.get('current_date') - RETRY_PERIOD)
@@ -129,7 +140,8 @@ def main():
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
             send_message(bot, message)
-        time.sleep(RETRY_PERIOD)
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
